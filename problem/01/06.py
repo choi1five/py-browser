@@ -1,5 +1,39 @@
 # 실행 명령어: python problem/01/06.py https://example.com
 
+# Keep-Alive 구현 (의사코드)
+
+# socket_pool = {}  // 호스트별 소켓 저장
+
+# 요청 함수
+    # socket = socket_pool.get(host)  // 풀에서 소켓 찾기
+    
+    # if socket == null:  // 소켓이 없으면
+        # socket.connect(host)  // 3-way handshake
+        # socket_pool.add(host, socket)  // 풀에 저장
+    
+    # try:
+        # socket.send(request)  // 요청 전송
+        # response = socket.recv()  // 응답 수신
+        # return response  // 소켓은 닫지 않음!
+        
+    # except ConnectionError:  // send 실패 (상대방이 이미 닫음)
+        # socket_pool.remove(host)  // 풀에서 제거
+        # socket.connect(host)  // 재연결 (3-way handshake)
+        # socket_pool.add(host, socket)  // 풀에 다시 저장
+        # socket.send(request)  // 재시도
+        # response = socket.recv()  // 응답 수신
+        # return response
+
+
+# 백그라운드 타임아웃 관리
+    # while true:  // 무한 반복
+        # sleep(1)  // 1초마다 체크
+        
+        # for socket in socket_pool:  // 모든 소켓 순회
+            # if timeout(socket, 5):  // 5초 이상 사용 안 함
+                # socket.close()  // 연결 종료 (4-way handshake)
+                # socket_pool.remove(socket)  // 풀에서 제거
+
 import socket
 import ssl
 
