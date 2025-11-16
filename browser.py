@@ -5,6 +5,8 @@ import tkinter.font
 import urllib.parse
 import dukpy
 
+COOKIE_JAR = {}
+
 class URL:
     def __init__(self, url):
         self.scheme, url = url.split("://", 1)
@@ -24,6 +26,9 @@ class URL:
             self.host, port = self.host.split(":", 1)
             self.port = int(port)
 
+    def origin(self):
+        return self.scheme + "://" + self.host + ":" + str(self.port)
+
     def resolve(self, url):
         if "://" in url: return URL(url)
         if not url.startswith("/"):
@@ -39,7 +44,7 @@ class URL:
             return URL(self.scheme + "://" + self.host + \
                        ":" + str(self.port) + url)
 
-    def request(self, payload=None):
+    def request(self, referrer, payload=None):
         s = socket.socket(
             family=socket.AF_INET,
             type=socket.SOCK_STREAM,
@@ -57,6 +62,14 @@ class URL:
             length = len(payload.encode("utf8"))
             request += "Content-Length: {}\r\n".format(length)
         request += "Host: {}\r\n".format(self.host)
+        if self.host in COOKIE_JAR:
+            cookie, params = COOKIE_JAR[self.host]
+            allow_cookie = True
+            if referrer and params.get("samesite", "none") == "lax":
+                if method != "GET":
+                    allow_cookie = self.host == referrer.host
+            if allow_cookie:
+                request += "Cookie: {}\r\n".format(cookie)
         request += "\r\n"
         if payload:
             request += payload
@@ -75,13 +88,26 @@ class URL:
             header, value = line.split(":", 1)
             response_headers[header.casefold()] = value.strip()
 
+        if "set-cookie" in response_headers:
+            cookie = response_headers["set-cookie"]
+            params = {}
+            if ";" in cookie:
+                cookie, rest = cookie.split(";", 1)
+                for param in rest.split(";"):
+                    if '=' in param:
+                        param, value = param.split("=", 1)
+                    else:
+                        value = "true"
+                    params[param.strip().casefold()] = value.casefold()
+            COOKIE_JAR[self.host] = (cookie, params)
+
         assert "transfer-encoding" not in response_headers
         assert "content-encoding" not in response_headers
 
-        body = response.read()
+        content = response.read()
         s.close()
 
-        return body
+        return response_headers, content
 
     def __str__(self):
         port_part = ":" + str(self.port)
@@ -113,6 +139,8 @@ class JSContext:
         self.interp.export_function("getAttribute",
             self.getAttribute)
         self.interp.export_function("innerHTML_set", self.innerHTML_set)
+        self.interp.export_function("XMLHttpRequest_send",
+            self.XMLHttpRequest_send)
         self.interp.evaljs(RUNTIME_JS)
 
         self.node_to_handle = {}
@@ -159,6 +187,15 @@ class JSContext:
         for child in elt.children:
             child.parent = elt
         self.tab.render()
+
+    def XMLHttpRequest_send(self, method, url, body):
+        full_url = self.tab.url.resolve(url)
+        if not self.tab.allowed_request(full_url):
+            raise Exception("Cross-origin XHR blocked by CSP")
+        headers, out = full_url.request(self.tab.url, body)
+        if full_url.origin() != self.tab.url.origin():
+            raise Exception("Cross-origin XHR request not allowed")
+        return out
 
 class CSSParser:
     def __init__(self, s):
@@ -829,10 +866,23 @@ class Tab:
         self.tab_height = tab_height
         self.focus = None
 
+    def allowed_request(self, url):
+        return self.allowed_origins == None or \
+            url.origin() in self.allowed_origins
+
     def load(self, url, payload=None):
-        self.url = url
+        headers, body = url.request(self.url, payload)
         self.history.append(url)
-        body = url.request(payload)
+        self.url = url
+
+        self.allowed_origins = None
+        if "content-security-policy" in headers:
+           csp = headers["content-security-policy"].split()
+           if len(csp) > 0 and csp[0] == "default-src":
+                self.allowed_origins = []
+                for origin in csp[1:]:
+                    self.allowed_origins.append(URL(origin).origin())
+
         self.nodes = HTMLParser(body).parse()
 
         self.js = JSContext(self)
@@ -843,8 +893,11 @@ class Tab:
                    and "src" in node.attributes]
         for script in scripts:
             script_url = url.resolve(script)
+            if not self.allowed_request(script_url):
+                print("Blocked script", script, "due to CSP")
+                continue
             try:
-                body = script_url.request()
+                headers, body = script_url.request(url)
             except:
                 continue
             self.js.run(script, body)
@@ -858,8 +911,11 @@ class Tab:
                  and "href" in node.attributes]
         for link in links:
             style_url = url.resolve(link)
+            if not self.allowed_request(style_url):
+                print("Blocked style", link, "due to CSP")
+                continue
             try:
-                body = style_url.request()
+                headers, body = style_url.request(url)
             except:
                 continue
             self.rules.extend(CSSParser(body).parse())
@@ -1147,5 +1203,5 @@ class Browser:
 
 if __name__ == "__main__":
     import sys
-    Browser().new_tab(URL("http://browser.engineering"))
+    Browser().new_tab(URL(sys.argv[1]))
     tkinter.mainloop()
